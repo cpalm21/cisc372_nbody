@@ -5,12 +5,13 @@
 #include "vector.h"
 #include "config.h"
 #include "planets.h"
-#include "compute2.h"
+#include "compute.h"
 
 // represents the objects in the system.  Global variables
 vector3 *hVel, *d_hVel;
 vector3 *hPos, *d_hPos;
 double *mass, *d_mass;
+vector3* accels;
 
 //initHostMemory: Create storage for numObjects entities in our system
 //Parameters: numObjects: number of objects to allocate
@@ -99,20 +100,65 @@ int main(int argc, char **argv)
 	planetFill();
 	randomFill(NUMPLANETS + 1, NUMASTEROIDS);
 	//now we have a system.
-	#ifdef DEBUG
-	printSystem(stdout);
-	#endif
 	
-	for (t_now=0;t_now<DURATION;t_now+=INTERVAL){
-		compute();
+	printSystem(stdout);
+	
+	//allocate accels array 
+	cudaMalloc(&accels, sizeof(vector3) * NUMENTITIES * NUMENTITIES);
 
+	//allocate cuda version of hPos, hVel, and mass
+	cudaError_t err = cudaMalloc(&d_hPos, sizeof(vector3)*NUMENTITIES);
+    if(err != cudaSuccess){
+        printf("Malloc failed: %s\n", cudaGetErrorString(err));
+    }
+	cudaMalloc(&d_hVel, sizeof(vector3)*NUMENTITIES);
+	cudaMalloc(&d_mass, sizeof(double)*NUMENTITIES);
+
+	//copy memory from hPos to d_hPos, hVel to d_hVel, etc
+	cudaMemcpy(d_hPos, hPos, sizeof(vector3)*NUMENTITIES, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_hVel, hVel, sizeof(vector3)*NUMENTITIES, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_mass, mass, sizeof(double)*NUMENTITIES, cudaMemcpyHostToDevice);
+
+	//assign grid and block dimensions for compute kernel
+	dim3 dimBlocksCompute(16, 16);
+	dim3 dimGridCompute((NUMENTITIES + dimBlocksCompute.x - 1) / dimBlocksCompute.x, (NUMENTITIES + dimBlocksCompute.y - 1) / dimBlocksCompute.y);
+
+	//assign grid and block dimensions for updateValue kernel  
+	int dimBlocksUpdate = 256;
+	int dimGridUpdate = (NUMENTITIES + dimBlocksUpdate - 1) / dimBlocksUpdate;
+
+	for (t_now=0;t_now<DURATION;t_now+=INTERVAL){
+		compute<<<dimGridCompute, dimBlocksCompute>>>(accels, d_mass, d_hVel, d_hPos);
+        cudaDeviceSynchronize();
+		updateValues<<<dimGridUpdate, dimBlocksUpdate>>>(accels, d_hVel, d_hPos);
+		cudaDeviceSynchronize();
 	}
 	clock_t t1=clock()-t0;
 	
+	//copy device memory back to host 
+	cudaError_t err2 = cudaMemcpy(hPos, d_hPos, sizeof(vector3)*NUMENTITIES, cudaMemcpyDeviceToHost);
+	if(err2 != cudaSuccess){
+        printf("Malloc failed: %s\n", cudaGetErrorString(err));
+    }
 	
-#ifdef DEBUG
+	cudaMemcpy(hVel, d_hVel, sizeof(vector3)*NUMENTITIES, cudaMemcpyDeviceToHost);
+	printf("Succesful copy\n");
+	cudaMemcpy(mass, d_mass, sizeof(double)*NUMENTITIES, cudaMemcpyDeviceToHost);
+
+	//free device memory 
+	cudaFree(d_hPos);
+	cudaFree(d_hVel);
+	cudaFree(d_mass);
+	cudaFree(accels);
+
+
+
+	printf("Entering printSystem\n");
+
+	#ifdef DEBUG
 	printSystem(stdout);
-#endif
+
+	#endif
 	printf("This took a total time of %f seconds\n",(double)t1/CLOCKS_PER_SEC);
 
 	freeHostMemory();
